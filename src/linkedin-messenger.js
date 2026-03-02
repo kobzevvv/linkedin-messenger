@@ -47,6 +47,13 @@ export class LinkedInMessenger {
     await this.page.locator('ul[aria-label="Conversation List"]')
       .waitFor({ timeout: this.timeout });
     await this.page.waitForTimeout(1000);
+
+    // Close any open dropdowns that might intercept clicks
+    await this.page.evaluate(() => {
+      document.querySelectorAll('.artdeco-dropdown--is-open .artdeco-dropdown__trigger')
+        .forEach(el => el.click());
+    });
+    await this.page.waitForTimeout(300);
   }
 
   /**
@@ -168,9 +175,9 @@ export class LinkedInMessenger {
 
     for (let i = 0; i < metadata.length; i++) {
       const item = listItems.nth(i);
-      // Click the conversation card area
+      // Click via JS to avoid overlay interception
       const clickTarget = item.locator('.msg-conversation-listitem__link').first();
-      await clickTarget.click();
+      await clickTarget.evaluate(el => el.click());
       await this.page.waitForTimeout(600);
 
       // Read threadUrl from browser URL
