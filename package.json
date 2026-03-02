@@ -1,0 +1,13 @@
+{
+  "name": "linkedin-messenger",
+  "version": "0.1.0",
+  "description": "LinkedIn messaging automation via Playwright — read inbox, get threads, send messages",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node test/test-read.js"
+  },
+  "dependencies": {
+    "playwright-core": "^1.50.0"
+  }
+}
