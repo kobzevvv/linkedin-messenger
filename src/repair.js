@@ -109,7 +109,8 @@ export async function repairSelectors(brokenSelectors, { log = console.log } = {
   // Parse JSON response — strip markdown fences if present
   let changes;
   try {
-    const cleaned = text.replace(/^```json?\n?/m, '').replace(/\n?```$/m, '').trim();
+    const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const cleaned = (fenceMatch ? fenceMatch[1] : text).trim();
     changes = JSON.parse(cleaned);
     if (!Array.isArray(changes)) throw new Error('Response is not an array');
   } catch (err) {
@@ -137,7 +138,7 @@ export async function repairSelectors(brokenSelectors, { log = console.log } = {
       continue;
     }
 
-    modified = modified.replace(change.oldString, change.newString);
+    modified = modified.replaceAll(change.oldString, change.newString);
     applied.push(change);
     log(`[repair]   Applied: "${change.oldString.substring(0, 60)}" → "${change.newString.substring(0, 60)}"`);
   }

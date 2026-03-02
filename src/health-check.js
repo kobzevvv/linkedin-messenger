@@ -203,8 +203,9 @@ export async function runHealthCheck(page, { timeout = 5000, log = console.log }
   for (const entry of threadSelectors) {
     if (!threadReachable) {
       const record = { ...entry, ok: false, count: 0, skipped: true };
+      record.domContext = await captureDomContext(page, entry.selector);
       results.push(record);
-      // Don't add to broken — the inbox selector being broken is the root cause
+      broken.push(record);
       continue;
     }
     const result = await testSelector(page, entry.selector, timeout);

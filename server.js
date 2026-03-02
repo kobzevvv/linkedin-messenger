@@ -16,10 +16,20 @@
  * Requires Chrome running with --remote-debugging-port=9222
  */
 
+import { readFileSync } from 'fs';
 import express from 'express';
 import { LinkedInMessenger } from './src/index.js';
 import { runHealthCheck } from './src/health-check.js';
 import { repairSelectors } from './src/repair.js';
+
+// Load .env file if present (for launchd which bypasses start.sh)
+try {
+  const envFile = readFileSync('.env', 'utf-8');
+  for (const line of envFile.split('\n')) {
+    const match = line.match(/^(\w+)=(.*)$/);
+    if (match && !process.env[match[1]]) process.env[match[1]] = match[2];
+  }
+} catch {}
 
 const PORT = parseInt(process.env.PORT || '3456', 10);
 const CDP_PORT = parseInt(process.env.CDP_PORT || '9222', 10);
@@ -211,12 +221,14 @@ app.post('/api/repair', async (_req, res) => {
     }
 
     const result = await repairSelectors(report.broken);
-    res.json({ ...result, report });
 
     if (result.repaired) {
-      console.log('[repair] Selectors repaired. Exiting with code 75 for restart...');
-      setTimeout(() => process.exit(75), 500);
+      res.on('finish', () => {
+        console.log('[repair] Selectors repaired. Exiting with code 75 for restart...');
+        setTimeout(() => process.exit(75), 200);
+      });
     }
+    res.json({ ...result, report });
   } catch (err) {
     console.error('[repair]', err);
     res.status(500).json({ error: err.message });
