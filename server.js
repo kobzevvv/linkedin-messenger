@@ -216,9 +216,10 @@ app.get('/api/hiring/applicants', async (req, res) => {
 
 // Force refresh applicants cache
 app.post('/api/hiring/applicants/refresh', async (req, res) => {
-  const jobUrl = req.query.jobId || req.body.jobId;
-  const filter = req.query.filter || req.body.filter || 'all';
-  const limit = parseInt(req.query.limit || req.body.limit || '200', 10);
+  const body = req.body || {};
+  const jobUrl = req.query.jobId || body.jobId;
+  const filter = req.query.filter || body.filter || 'all';
+  const limit = parseInt(req.query.limit || body.limit || '200', 10);
   if (!jobUrl) {
     return res.status(400).json({ error: 'jobId is required' });
   }
