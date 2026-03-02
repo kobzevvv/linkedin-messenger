@@ -39,10 +39,18 @@ export class LinkedInMessenger {
     this.context = this.browser.contexts()[0];
     if (!this.context) throw new Error('No browser context found. Is Chrome running?');
 
-    // Use existing page or create new one
+    // Use existing LinkedIn page or create new one, close extras
     const pages = this.context.pages();
-    this.page = pages.find(p => p.url().includes('linkedin.com/messaging')) || await this.context.newPage();
+    this.page = pages.find(p => p.url().includes('linkedin.com')) || await this.context.newPage();
     this.page.setDefaultTimeout(this.timeout);
+
+    // Close other LinkedIn tabs to prevent memory bloat
+    for (const p of pages) {
+      if (p !== this.page && p.url().includes('linkedin.com')) {
+        this._log(`  Closing extra tab: ${p.url().substring(0, 80)}`);
+        await p.close().catch(() => {});
+      }
+    }
     this._log(`Connected. Page: ${this.page.url()}`);
   }
 
