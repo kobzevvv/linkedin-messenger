@@ -10,7 +10,8 @@ import { chromium } from 'playwright-core';
  * - sendMessage(threadUrl, text) → send a message in an existing thread
  * - markAsRead(threadUrl) → open thread to mark it as read
  * - getHiringApplicants(jobUrl) → list of applicants from a job posting
- * - getApplicantThreadUrl(jobId, applicationId) → thread URL for a specific applicant
+ * - getHiringMessages(jobUrl)   → applicants matched with messaging threads
+ * - messageApplicant(jobId, applicationId, text) → message an applicant via hiring page
  *
  * All methods use Playwright to interact with linkedin.com/messaging/ and /hiring/.
  * The Chrome instance must be started with --remote-debugging-port.
@@ -20,17 +21,20 @@ export class LinkedInMessenger {
    * @param {object} opts
    * @param {number} opts.cdpPort - Chrome DevTools Protocol port (default: 9222)
    * @param {number} opts.timeout - Default timeout for operations in ms (default: 10000)
+   * @param {function} opts.log - Logger function (default: console.log with [LM] prefix)
    */
-  constructor({ cdpPort = 9222, timeout = 10000 } = {}) {
+  constructor({ cdpPort = 9222, timeout = 10000, log } = {}) {
     this.cdpPort = cdpPort;
     this.timeout = timeout;
     this.browser = null;
     this.context = null;
     this.page = null;
+    this._log = log || ((...args) => console.log('[LM]', ...args));
   }
 
   /** Connect to running Chrome via CDP */
   async connect() {
+    this._log(`Connecting to Chrome CDP on port ${this.cdpPort}...`);
     this.browser = await chromium.connectOverCDP(`http://localhost:${this.cdpPort}`);
     this.context = this.browser.contexts()[0];
     if (!this.context) throw new Error('No browser context found. Is Chrome running?');
@@ -39,6 +43,7 @@ export class LinkedInMessenger {
     const pages = this.context.pages();
     this.page = pages.find(p => p.url().includes('linkedin.com/messaging')) || await this.context.newPage();
     this.page.setDefaultTimeout(this.timeout);
+    this._log(`Connected. Page: ${this.page.url()}`);
   }
 
   /** Navigate to LinkedIn messaging if not already there */
@@ -59,54 +64,6 @@ export class LinkedInMessenger {
   }
 
   /**
-   * Parse conversation metadata from a list item (no clicking).
-   * @private
-   */
-  _parseConversationItem() {
-    return (item) => {
-      const nameEl = item.querySelector('h3');
-      const name = nameEl?.textContent?.trim() || '';
-      if (!name) return null;
-
-      // Last message preview
-      const previewEl = item.querySelector('p');
-      let lastMessage = previewEl?.textContent?.trim() || '';
-
-      // Determine who sent the last message
-      let lastMessageFrom = 'them';
-      if (lastMessage.startsWith('You: ')) {
-        lastMessageFrom = 'me';
-        lastMessage = lastMessage.replace(/^You: /, '');
-      } else {
-        // Format is "Name: message" for their messages
-        const colonIdx = lastMessage.indexOf(': ');
-        if (colonIdx > 0 && colonIdx < 40) {
-          lastMessage = lastMessage.substring(colonIdx + 2);
-        }
-      }
-
-      // Timestamp
-      const timeEl = item.querySelector('time');
-      const lastMessageTime = timeEl?.getAttribute('datetime') || timeEl?.textContent?.trim() || '';
-
-      // Unread badge — look for the notification count text
-      let unreadCount = 0;
-      const allSpans = item.querySelectorAll('span');
-      for (const span of allSpans) {
-        const text = span.textContent?.trim();
-        const match = text?.match(/^(\d+) (new notification|unread message)/);
-        if (match) {
-          unreadCount = parseInt(match[1]) || 0;
-          break;
-        }
-      }
-      const isUnread = unreadCount > 0;
-
-      return { name, lastMessage, lastMessageTime, lastMessageFrom, isUnread, unreadCount };
-    };
-  }
-
-  /**
    * Get recent conversations from inbox.
    * Clicks each conversation to resolve threadUrl from the URL bar.
    *
@@ -123,6 +80,7 @@ export class LinkedInMessenger {
    * }>>}
    */
   async getInbox({ limit = 10 } = {}) {
+    this._log(`getInbox(limit=${limit})`);
     await this._ensureMessagingPage();
 
     // First pass: collect metadata from DOM (fast, no navigation)
@@ -192,6 +150,7 @@ export class LinkedInMessenger {
       conversations.push({ ...metadata[i], threadUrl });
     }
 
+    this._log(`getInbox → ${conversations.length} conversations`);
     return conversations;
   }
 
@@ -236,6 +195,7 @@ export class LinkedInMessenger {
    * }>}
    */
   async getThread(threadUrl, { limit = 50 } = {}) {
+    this._log(`getThread(${threadUrl.substring(0, 80)}, limit=${limit})`);
     const url = threadUrl.startsWith('http')
       ? threadUrl
       : `https://www.linkedin.com/messaging/thread/${threadUrl}/`;
@@ -295,6 +255,7 @@ export class LinkedInMessenger {
       return { name, profileUrl, messages };
     }, limit);
 
+    this._log(`getThread → ${result.name}, ${result.messages.length} messages`);
     return result;
   }
 
@@ -306,6 +267,7 @@ export class LinkedInMessenger {
    * @returns {Promise<{ ok: boolean }>}
    */
   async sendMessage(threadUrl, text) {
+    this._log(`sendMessage(${threadUrl.substring(0, 80)}, "${text.substring(0, 40)}...")`);
     const url = threadUrl.startsWith('http')
       ? threadUrl
       : `https://www.linkedin.com/messaging/thread/${threadUrl}/`;
@@ -330,6 +292,7 @@ export class LinkedInMessenger {
     await this.page.keyboard.press('Enter');
     await this.page.waitForTimeout(1000);
 
+    this._log('sendMessage → sent');
     return { ok: true };
   }
 
@@ -369,6 +332,7 @@ export class LinkedInMessenger {
    * }>>}
    */
   async getHiringApplicants(jobUrl, { limit = 25 } = {}) {
+    this._log(`getHiringApplicants(jobUrl=${String(jobUrl).substring(0, 60)}, limit=${limit})`);
     const jobId = typeof jobUrl === 'string' && jobUrl.startsWith('http')
       ? jobUrl.match(/jobId=(\d+)/)?.[1] || jobUrl
       : String(jobUrl);
@@ -442,11 +406,17 @@ export class LinkedInMessenger {
       const url = this.page.url();
       const applicationId = url.match(/applicationId=(\d+)/)?.[1] || '';
 
-      // Check contacted status from the right panel text
+      // Check contacted status — scope to the right-panel area
+      // between "Resume" and "Qualifications" to avoid false positives from left panel
       const status = await this.page.evaluate(() => {
         const text = document.body.innerText;
-        const appliedMatch = text.match(/Applied (.+?)(?:\s*·|\n|$)/);
-        const contactedMatch = text.match(/Contacted (.+?)(?:\s*·|\n|$)/);
+        const resumeIdx = text.indexOf('Resume');
+        const qualIdx = text.indexOf('Qualifications', resumeIdx);
+        const panel = resumeIdx >= 0
+          ? text.substring(resumeIdx, qualIdx > resumeIdx ? qualIdx : resumeIdx + 500)
+          : '';
+        const appliedMatch = panel.match(/Applied (.+?)(?:\s*·|\n|$)/);
+        const contactedMatch = panel.match(/Contacted (.+?)(?:\s*·|\n|$)/);
         return {
           appliedTime: appliedMatch?.[1]?.trim() || '',
           contacted: !!contactedMatch,
@@ -454,9 +424,11 @@ export class LinkedInMessenger {
         };
       });
 
+      this._log(`  [${i + 1}/${listData.length}] ${listData[i].name} → appId=${applicationId} ${status.contacted ? '✓contacted' : ''}`);
       applicants.push({ ...listData[i], applicationId, ...status });
     }
 
+    this._log(`getHiringApplicants → ${applicants.length} applicants`);
     return applicants;
   }
 
@@ -486,17 +458,22 @@ export class LinkedInMessenger {
     // Step 2: Scan messaging inbox
     const inbox = await this.getInbox({ limit: inboxDepth });
 
-    // Step 3: Match by name (fuzzy — last name match)
+    // Step 3: Match by name (exact full-name first, then whole-word last name)
+    this._log(`Matching ${applicants.length} applicants against ${inbox.length} inbox threads`);
     for (const applicant of applicants) {
+      const fullName = applicant.name.toLowerCase();
       const nameParts = applicant.name.split(/\s+/);
       const lastName = nameParts[nameParts.length - 1]?.toLowerCase();
+      const lastNameRegex = lastName?.length >= 2 ? new RegExp(`\\b${lastName}\\b`) : null;
 
       const match = inbox.find(c => {
         const cName = c.name.toLowerCase();
-        return cName.includes(lastName) || applicant.name.toLowerCase() === cName;
+        if (cName === fullName) return true;
+        return lastNameRegex ? lastNameRegex.test(cName) : false;
       });
 
       if (match) {
+        this._log(`  ✓ ${applicant.name} → matched inbox: "${match.name}"`);
         applicant.threadUrl = match.threadUrl;
         applicant.lastMessage = match.lastMessage;
         applicant.lastMessageFrom = match.lastMessageFrom;
@@ -507,6 +484,8 @@ export class LinkedInMessenger {
       }
     }
 
+    const matched = applicants.filter(a => a.threadUrl).length;
+    this._log(`getHiringMessages → ${matched}/${applicants.length} matched with inbox`);
     return applicants;
   }
 
@@ -520,13 +499,20 @@ export class LinkedInMessenger {
    * @returns {Promise<{ ok: boolean, threadUrl: string }>}
    */
   async messageApplicant(jobId, applicationId, text) {
+    this._log(`messageApplicant(jobId=${jobId}, appId=${applicationId}, text="${text.substring(0, 40)}...")`);
     // Navigate to the specific applicant's profile on the hiring page
-    const url = `https://www.linkedin.com/hiring/applicants/${applicationId}/?jobId=${jobId}`;
+    const url = `https://www.linkedin.com/hiring/applicants/?jobId=${jobId}&applicationId=${applicationId}`;
     await this.page.goto(url, { waitUntil: 'domcontentloaded' });
     await this.page.waitForTimeout(3000);
 
-    // Click "Message" button in the applicant detail panel
-    const messageBtn = this.page.locator('button, a').filter({ hasText: /^Message$/ }).first();
+    // Open Contact dropdown, then click Message
+    this._log('  Opening Contact → Message...');
+    const contactBtn = this.page.getByRole('button', { name: 'Contact' });
+    await contactBtn.waitFor({ timeout: this.timeout });
+    await contactBtn.click();
+    await this.page.waitForTimeout(500);
+
+    const messageBtn = this.page.getByRole('menuitem', { name: 'Message' });
     await messageBtn.waitFor({ timeout: this.timeout });
     await messageBtn.click();
     await this.page.waitForTimeout(2000);
@@ -601,6 +587,7 @@ export class LinkedInMessenger {
       }
     }
 
+    this._log(`messageApplicant → sent, threadUrl=${threadUrl || 'not found'}`);
     return { ok: true, threadUrl };
   }
 

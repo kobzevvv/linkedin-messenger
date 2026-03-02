@@ -1,11 +1,16 @@
 /**
  * HTTP wrapper around LinkedInMessenger for use by CF Workers.
  *
- * Endpoints:
- *   POST /api/send-message    { threadUrl, text }              → { ok: true }
- *   GET  /api/thread?url=...&limit=50                          → { name, profileUrl, messages }
- *   GET  /api/unread                                           → [{ name, threadUrl, ... }]
- *   POST /api/mark-read       { threadUrl }                    → { ok: true }
+ * Messaging endpoints:
+ *   POST /api/send-message              { threadUrl, text }                → { ok }
+ *   GET  /api/thread?url=...&limit=50                                     → { name, profileUrl, messages }
+ *   GET  /api/unread                                                      → [{ name, threadUrl, ... }]
+ *   POST /api/mark-read                 { threadUrl }                     → { ok }
+ *
+ * Hiring endpoints:
+ *   GET  /api/hiring/applicants?jobId=...&limit=25                        → [{ name, title, ... }]
+ *   POST /api/hiring/message            { jobId, applicationId, text }    → { ok, threadUrl }
+ *   GET  /api/hiring/messages?jobId=...&limit=25&inboxDepth=30            → [{ name, threadUrl, ... }]
  *
  * Start: node server.js
  * Requires Chrome running with --remote-debugging-port=9222
@@ -24,9 +29,9 @@ let messenger = null;
 
 async function getMessenger() {
   if (!messenger) {
-    messenger = new LinkedInMessenger({ cdpPort: CDP_PORT });
-    await messenger.connect();
-    console.log(`Connected to Chrome CDP on port ${CDP_PORT}`);
+    const m = new LinkedInMessenger({ cdpPort: CDP_PORT });
+    await m.connect(); // only assign if connect succeeds
+    messenger = m;
   }
   return messenger;
 }
@@ -34,8 +39,8 @@ async function getMessenger() {
 // Serialize all Playwright operations — single page, no concurrent access
 let queue = Promise.resolve();
 function serialized(fn) {
-  const task = queue.then(fn).catch(fn.__errorHandler || (e => { throw e; }));
-  queue = task.catch(() => {}); // prevent chain break
+  const task = queue.then(fn);
+  queue = task.catch(() => {}); // prevent chain break on error
   return task;
 }
 
