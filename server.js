@@ -8,9 +8,10 @@
  *   POST /api/mark-read                 { threadUrl }                     → { ok }
  *
  * Hiring endpoints:
- *   GET  /api/hiring/applicants?jobId=...&limit=25                        → [{ name, title, ... }]
+ *   GET  /api/hiring/applicants?jobId=...                                 → { applicants, lastUpdated, cached }
+ *   POST /api/hiring/applicants/refresh?jobId=...                         → { ok } (triggers background scrape)
  *   POST /api/hiring/message            { jobId, applicationId, text }    → { ok, threadUrl }
- *   GET  /api/hiring/messages?jobId=...&limit=25&inboxDepth=30            → [{ name, threadUrl, ... }]
+ *   GET  /api/hiring/messages?jobId=...&inboxDepth=30                     → [{ name, threadUrl, ... }]
  *
  * Start: node server.js
  * Requires Chrome running with --remote-debugging-port=9222
@@ -130,7 +131,37 @@ app.post('/api/mark-read', async (req, res) => {
   }
 });
 
-// Get applicants from a job posting
+// ── Hiring applicants cache ──────────────────────────────────
+// Scraping 3 filter groups with scroll takes 2-3 minutes — too slow for
+// Cloudflare's 100s timeout. We scrape in background and serve from cache.
+
+const hiringCache = new Map(); // jobId → { data, lastUpdated, scraping }
+
+function getCacheKey(jobId, filter) { return `${jobId}:${filter}`; }
+
+async function scrapeApplicants(jobId, filter, limit) {
+  const key = getCacheKey(jobId, filter);
+  const entry = hiringCache.get(key) || { data: [], lastUpdated: null, scraping: false };
+  if (entry.scraping) return; // already in progress
+  entry.scraping = true;
+  hiringCache.set(key, entry);
+
+  console.log(`[hiring-cache] Scraping jobId=${jobId} filter=${filter}...`);
+  try {
+    const applicants = await serialized(async () => {
+      const m = await getMessenger();
+      return m.getHiringApplicants(jobId, { limit, filter });
+    });
+    hiringCache.set(key, { data: applicants, lastUpdated: new Date().toISOString(), scraping: false });
+    console.log(`[hiring-cache] Cached ${applicants.length} applicants for ${key}`);
+  } catch (err) {
+    console.error(`[hiring-cache] Scrape failed for ${key}:`, err.message);
+    entry.scraping = false;
+    hiringCache.set(key, entry);
+  }
+}
+
+// Get applicants from a job posting (returns cached data)
 app.get('/api/hiring/applicants', async (req, res) => {
   const jobUrl = req.query.jobId || req.query.url;
   const limit = parseInt(req.query.limit || '200', 10);
@@ -141,16 +172,59 @@ app.get('/api/hiring/applicants', async (req, res) => {
   if (!['all', 'top', 'maybe', 'notfit'].includes(filter)) {
     return res.status(400).json({ error: 'filter must be one of: all, top, maybe, notfit' });
   }
-  try {
-    const applicants = await serialized(async () => {
-      const m = await getMessenger();
-      return m.getHiringApplicants(jobUrl, { limit, filter });
-    });
-    res.json(applicants);
-  } catch (err) {
-    console.error('[hiring/applicants]', err);
-    res.status(500).json({ error: err.message });
+
+  const jobId = jobUrl.match?.(/jobId=(\d+)/)?.[1] || jobUrl;
+  const key = getCacheKey(jobId, filter);
+  const cached = hiringCache.get(key);
+
+  // Return cached data if fresh (< 10 min)
+  if (cached?.lastUpdated) {
+    const ageMs = Date.now() - new Date(cached.lastUpdated).getTime();
+    if (ageMs < 10 * 60 * 1000) {
+      return res.json({
+        applicants: cached.data,
+        lastUpdated: cached.lastUpdated,
+        cached: true,
+        count: cached.data.length,
+      });
+    }
   }
+
+  // Stale or missing — trigger background scrape
+  scrapeApplicants(jobId, filter, limit);
+
+  // Return stale data if we have any, otherwise signal scraping in progress
+  if (cached?.data?.length) {
+    return res.json({
+      applicants: cached.data,
+      lastUpdated: cached.lastUpdated,
+      cached: true,
+      stale: true,
+      count: cached.data.length,
+    });
+  }
+
+  res.json({
+    applicants: [],
+    lastUpdated: null,
+    cached: false,
+    scraping: true,
+    count: 0,
+    message: 'First scrape started. Retry in 2-3 minutes.',
+  });
+});
+
+// Force refresh applicants cache
+app.post('/api/hiring/applicants/refresh', async (req, res) => {
+  const jobUrl = req.query.jobId || req.body.jobId;
+  const filter = req.query.filter || req.body.filter || 'all';
+  const limit = parseInt(req.query.limit || req.body.limit || '200', 10);
+  if (!jobUrl) {
+    return res.status(400).json({ error: 'jobId is required' });
+  }
+  const jobId = jobUrl.match?.(/jobId=(\d+)/)?.[1] || jobUrl;
+  scrapeApplicants(jobId, filter, limit);
+  res.json({ ok: true, message: 'Refresh started. Check /api/hiring/applicants in 2-3 minutes.' });
 });
 
 // Send a message to a hiring applicant (creates new thread)
@@ -274,11 +348,25 @@ async function scheduledHealthCheck() {
   }
 }
 
-// Check every 60s, fire at :00 and :30
+// ── Background cache refresh (every 10 min) ────────────────
+
+async function refreshHiringCaches() {
+  if (hiringCache.size === 0) return;
+  console.log(`[cache-refresh] Refreshing ${hiringCache.size} cached hiring queries...`);
+  for (const [key] of hiringCache) {
+    const [jobId, filter] = key.split(':');
+    await scrapeApplicants(jobId, filter, 200);
+  }
+}
+
+// Check every 60s — health check at :00/:30, cache refresh at :05/:15/:25/:35/:45/:55
 setInterval(() => {
   const min = new Date().getMinutes();
   if (min === 0 || min === 30) {
     scheduledHealthCheck();
+  }
+  if (min % 10 === 5) {
+    refreshHiringCaches();
   }
 }, 60_000);
 
