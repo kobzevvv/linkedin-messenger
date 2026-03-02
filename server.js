@@ -18,6 +18,8 @@
 
 import express from 'express';
 import { LinkedInMessenger } from './src/index.js';
+import { runHealthCheck } from './src/health-check.js';
+import { repairSelectors } from './src/repair.js';
 
 const PORT = parseInt(process.env.PORT || '3456', 10);
 const CDP_PORT = parseInt(process.env.CDP_PORT || '9222', 10);
@@ -179,6 +181,94 @@ app.get('/api/hiring/messages', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ── Health check & repair endpoints ──────────────────────────
+
+// Manual health check — tests all selectors against live page
+app.get('/api/health-check', async (_req, res) => {
+  try {
+    const report = await serialized(async () => {
+      const m = await getMessenger();
+      return runHealthCheck(m.page);
+    });
+    res.json(report);
+  } catch (err) {
+    console.error('[health-check]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manual repair — run health check, fix broken selectors, restart if needed
+app.post('/api/repair', async (_req, res) => {
+  try {
+    const report = await serialized(async () => {
+      const m = await getMessenger();
+      return runHealthCheck(m.page);
+    });
+
+    if (report.ok) {
+      return res.json({ repaired: false, message: 'All selectors OK', report });
+    }
+
+    const result = await repairSelectors(report.broken);
+    res.json({ ...result, report });
+
+    if (result.repaired) {
+      console.log('[repair] Selectors repaired. Exiting with code 75 for restart...');
+      setTimeout(() => process.exit(75), 500);
+    }
+  } catch (err) {
+    console.error('[repair]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Scheduled health check (every 30 min) ──────────────────
+
+let schedulerRunning = false;
+
+async function scheduledHealthCheck() {
+  if (schedulerRunning) return;
+  schedulerRunning = true;
+  console.log('[scheduler] Running scheduled health check...');
+
+  try {
+    const report = await serialized(async () => {
+      const m = await getMessenger();
+      return runHealthCheck(m.page);
+    });
+
+    if (report.ok) {
+      console.log('[scheduler] All selectors OK.');
+      return;
+    }
+
+    console.log(`[scheduler] ${report.broken.length} broken selector(s) found.`);
+
+    if (!process.env.ANTHROPIC_API_KEY) {
+      console.warn('[scheduler] ANTHROPIC_API_KEY not set — cannot auto-repair. Fix selectors manually.');
+      return;
+    }
+
+    const result = await repairSelectors(report.broken);
+    if (result.repaired) {
+      console.log('[scheduler] Selectors repaired. Exiting with code 75 for restart...');
+      setTimeout(() => process.exit(75), 500);
+    }
+  } catch (err) {
+    console.error('[scheduler] Health check failed:', err.message);
+  } finally {
+    schedulerRunning = false;
+  }
+}
+
+// Check every 60s, fire at :00 and :30
+setInterval(() => {
+  const min = new Date().getMinutes();
+  if (min === 0 || min === 30) {
+    scheduledHealthCheck();
+  }
+}, 60_000);
 
 // Graceful shutdown
 process.on('SIGINT', async () => {

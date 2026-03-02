@@ -1,0 +1,7 @@
+tunnel: f126f91b-4f00-4cf6-ba93-fd7e446bc72b
+credentials-file: /Users/vova/.cloudflared/f126f91b-4f00-4cf6-ba93-fd7e446bc72b.json
+
+ingress:
+  - hostname: linkedin-messenger.chillai.space
+    service: http://localhost:3456
+  - service: http_status:404
