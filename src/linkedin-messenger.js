@@ -341,7 +341,7 @@ export class LinkedInMessenger {
    *   fitCategory: string,
    * }>>}
    */
-  async getHiringApplicants(jobUrl, { limit = 25, filter = 'all' } = {}) {
+  async getHiringApplicants(jobUrl, { limit = 200, filter = 'all' } = {}) {
     this._log(`getHiringApplicants(jobUrl=${String(jobUrl).substring(0, 60)}, limit=${limit}, filter=${filter})`);
     const jobId = typeof jobUrl === 'string' && jobUrl.startsWith('http')
       ? jobUrl.match(/jobId=(\d+)/)?.[1] || jobUrl
@@ -470,32 +470,51 @@ export class LinkedInMessenger {
    * Scroll the applicant list container to load all lazy-loaded cards.
    */
   async _scrollApplicantList() {
-    const maxScrollAttempts = 30;
-    for (let attempt = 0; attempt < maxScrollAttempts; attempt++) {
+    const maxAttempts = 40;
+    let staleCount = 0;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const countBefore = await this.page.locator('[role="button"][aria-label="View full profile"]').count();
 
-      // Find the scrollable container by walking up from applicant cards
-      await this.page.evaluate(() => {
-        const card = document.querySelector('[role="button"][aria-label="View full profile"]');
-        if (!card) return;
+      // 1. Try clicking "Show more" / "Load more" button if present
+      const showMore = this.page.locator('button').filter({ hasText: /show more|load more|see more/i }).first();
+      if (await showMore.isVisible({ timeout: 500 }).catch(() => false)) {
+        this._log(`  Clicking "Show more" button...`);
+        await showMore.click();
+        await this.page.waitForTimeout(2000);
+      } else {
+        // 2. Scroll: last card into view + scroll all scrollable ancestors + window
+        await this.page.evaluate(() => {
+          const cards = document.querySelectorAll('[role="button"][aria-label="View full profile"]');
+          const lastCard = cards[cards.length - 1];
+          if (!lastCard) return;
 
-        // Walk up the DOM to find the nearest scrollable ancestor
-        let el = card.parentElement;
-        while (el && el !== document.body) {
-          if (el.scrollHeight > el.clientHeight + 50) {
-            el.scrollTop = el.scrollHeight;
-            return;
+          // Scroll last card into view (triggers intersection observer)
+          lastCard.scrollIntoView({ behavior: 'smooth', block: 'end' });
+
+          // Also scroll every scrollable ancestor to bottom
+          let el = lastCard.parentElement;
+          while (el && el !== document.body) {
+            if (el.scrollHeight > el.clientHeight + 50) {
+              el.scrollTop = el.scrollHeight;
+            }
+            el = el.parentElement;
           }
-          el = el.parentElement;
-        }
-        // Fallback: scroll window
-        window.scrollTo(0, document.body.scrollHeight);
-      });
-      await this.page.waitForTimeout(1500);
+
+          // Fallback: scroll window
+          window.scrollTo(0, document.body.scrollHeight);
+        });
+        await this.page.waitForTimeout(2000);
+      }
 
       const countAfter = await this.page.locator('[role="button"][aria-label="View full profile"]').count();
-      if (countAfter === countBefore) break; // No new cards loaded
-      this._log(`  Scrolled: ${countBefore} → ${countAfter} cards`);
+      if (countAfter > countBefore) {
+        staleCount = 0;
+        this._log(`  Scrolled: ${countBefore} → ${countAfter} cards`);
+      } else {
+        staleCount++;
+        if (staleCount >= 3) break; // 3 consecutive attempts with no new cards
+      }
     }
   }
 
