@@ -9,8 +9,10 @@ import { chromium } from 'playwright-core';
  * - getThread(threadUrl, limit) → full message history of a conversation
  * - sendMessage(threadUrl, text) → send a message in an existing thread
  * - markAsRead(threadUrl) → open thread to mark it as read
+ * - getHiringApplicants(jobUrl) → list of applicants from a job posting
+ * - getApplicantThreadUrl(jobId, applicationId) → thread URL for a specific applicant
  *
- * All methods use Playwright to interact with linkedin.com/messaging/.
+ * All methods use Playwright to interact with linkedin.com/messaging/ and /hiring/.
  * The Chrome instance must be started with --remote-debugging-port.
  */
 export class LinkedInMessenger {
@@ -345,6 +347,167 @@ export class LinkedInMessenger {
     await this.page.goto(url, { waitUntil: 'domcontentloaded' });
     await this.page.waitForTimeout(1500);
     return { ok: true };
+  }
+
+  // ── Hiring / Applicants ──────────────────────────────────────
+
+  /**
+   * Get applicants from a LinkedIn job posting's hiring page.
+   *
+   * @param {string} jobUrl - Full hiring URL (with jobId) or just the jobId
+   * @param {object} opts
+   * @param {number} opts.limit - Max applicants to return (default: 25)
+   * @returns {Promise<Array<{
+   *   name: string,
+   *   title: string,
+   *   location: string,
+   *   connectionDegree: string,
+   *   applicationId: string,
+   *   contacted: boolean,
+   *   contactedTime: string,
+   *   appliedTime: string,
+   * }>>}
+   */
+  async getHiringApplicants(jobUrl, { limit = 25 } = {}) {
+    const jobId = typeof jobUrl === 'string' && jobUrl.startsWith('http')
+      ? jobUrl.match(/jobId=(\d+)/)?.[1] || jobUrl
+      : String(jobUrl);
+
+    if (!jobId) throw new Error('Could not extract jobId from URL');
+
+    await this.page.goto(
+      `https://www.linkedin.com/hiring/applicants/?jobId=${jobId}`,
+      { waitUntil: 'domcontentloaded' },
+    );
+    await this.page.waitForTimeout(3000);
+
+    // Wait for applicant list
+    await this.page.locator('[role="button"][aria-label="View full profile"]')
+      .first()
+      .waitFor({ timeout: this.timeout });
+
+    // First pass: parse applicant metadata from the list (no clicking needed)
+    const listData = await this.page.evaluate((limit) => {
+      const btns = document.querySelectorAll('[role="button"][aria-label="View full profile"]');
+      const results = [];
+
+      for (const btn of btns) {
+        if (results.length >= limit) break;
+        // The container holds name, degree, title, location, qualifications
+        const container = btn.closest('li') || btn.parentElement?.parentElement?.parentElement;
+        if (!container) continue;
+
+        const text = container.innerText || '';
+        const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+        // Pattern: Name, "· 3rd", Title, Location, "3/3", "Must-have", "1/1", "Preferred"
+        let name = '';
+        let connectionDegree = '';
+        let title = '';
+        let location = '';
+
+        for (let j = 0; j < lines.length; j++) {
+          const line = lines[j];
+          // Connection degree line
+          if (line.match(/^·\s*\d+\w+$/)) {
+            connectionDegree = line.replace(/^·\s*/, '');
+            continue;
+          }
+          // Qualifications line (stop parsing)
+          if (line.match(/^\d+\/\d+$/) || line === 'Must-have' || line === 'Preferred') break;
+
+          if (!name) {
+            name = line;
+          } else if (!title) {
+            title = line;
+          } else if (!location) {
+            location = line;
+          }
+        }
+
+        results.push({ name, connectionDegree, title, location });
+      }
+
+      return results;
+    }, limit);
+
+    // Second pass: click each to get applicationId and contacted status
+    const profileBtns = this.page.locator('[role="button"][aria-label="View full profile"]');
+    const applicants = [];
+
+    for (let i = 0; i < listData.length; i++) {
+      await profileBtns.nth(i).click();
+      await this.page.waitForTimeout(1500);
+
+      const url = this.page.url();
+      const applicationId = url.match(/applicationId=(\d+)/)?.[1] || '';
+
+      // Check contacted status from the right panel text
+      const status = await this.page.evaluate(() => {
+        const text = document.body.innerText;
+        const appliedMatch = text.match(/Applied (.+?)(?:\s*·|\n|$)/);
+        const contactedMatch = text.match(/Contacted (.+?)(?:\s*·|\n|$)/);
+        return {
+          appliedTime: appliedMatch?.[1]?.trim() || '',
+          contacted: !!contactedMatch,
+          contactedTime: contactedMatch?.[1]?.trim() || '',
+        };
+      });
+
+      applicants.push({ ...listData[i], applicationId, ...status });
+    }
+
+    return applicants;
+  }
+
+  /**
+   * Get applicants from a hiring page matched with their messaging threads.
+   * Fetches the applicant list, then scans the messaging inbox to find
+   * existing conversations with those applicants by name.
+   *
+   * @param {string} jobUrl - Full hiring URL (with jobId) or just the jobId
+   * @param {object} opts
+   * @param {number} opts.limit - Max applicants (default: 25)
+   * @param {number} opts.inboxDepth - How many inbox conversations to scan (default: 30)
+   * @returns {Promise<Array<{
+   *   name: string,
+   *   title: string,
+   *   location: string,
+   *   applicationId: string,
+   *   threadUrl: string | null,
+   *   lastMessage: string,
+   *   lastMessageFrom: 'them' | 'me' | null,
+   * }>>}
+   */
+  async getHiringMessages(jobUrl, { limit = 25, inboxDepth = 30 } = {}) {
+    // Step 1: Get applicant list
+    const applicants = await this.getHiringApplicants(jobUrl, { limit });
+
+    // Step 2: Scan messaging inbox
+    const inbox = await this.getInbox({ limit: inboxDepth });
+
+    // Step 3: Match by name (fuzzy — last name match)
+    for (const applicant of applicants) {
+      const nameParts = applicant.name.split(/\s+/);
+      const lastName = nameParts[nameParts.length - 1]?.toLowerCase();
+
+      const match = inbox.find(c => {
+        const cName = c.name.toLowerCase();
+        return cName.includes(lastName) || applicant.name.toLowerCase() === cName;
+      });
+
+      if (match) {
+        applicant.threadUrl = match.threadUrl;
+        applicant.lastMessage = match.lastMessage;
+        applicant.lastMessageFrom = match.lastMessageFrom;
+      } else {
+        applicant.threadUrl = null;
+        applicant.lastMessage = '';
+        applicant.lastMessageFrom = null;
+      }
+    }
+
+    return applicants;
   }
 
   /** Disconnect from Chrome */
