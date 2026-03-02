@@ -510,6 +510,100 @@ export class LinkedInMessenger {
     return applicants;
   }
 
+  /**
+   * Send a message to a hiring applicant via the LinkedIn Hiring page.
+   * Opens the applicant's profile, clicks "Message", types text, and sends.
+   *
+   * @param {string} jobId - LinkedIn job ID
+   * @param {string} applicationId - Applicant's application ID
+   * @param {string} text - Message text to send
+   * @returns {Promise<{ ok: boolean, threadUrl: string }>}
+   */
+  async messageApplicant(jobId, applicationId, text) {
+    // Navigate to the specific applicant's profile on the hiring page
+    const url = `https://www.linkedin.com/hiring/applicants/${applicationId}/?jobId=${jobId}`;
+    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+    await this.page.waitForTimeout(3000);
+
+    // Click "Message" button in the applicant detail panel
+    const messageBtn = this.page.locator('button, a').filter({ hasText: /^Message$/ }).first();
+    await messageBtn.waitFor({ timeout: this.timeout });
+    await messageBtn.click();
+    await this.page.waitForTimeout(2000);
+
+    // Wait for the messaging overlay / compose box to appear
+    const textbox = this.page.locator('[role="textbox"]').first();
+    await textbox.waitFor({ timeout: this.timeout });
+    await textbox.click();
+    await textbox.fill(text);
+    await this.page.waitForTimeout(500);
+
+    // Click "Send" button — prefer the compose-form-specific class, fallback to text match
+    const sendBtn = this.page.locator('.msg-form__send-button, button[type="submit"]').first()
+      .or(this.page.locator('button').filter({ hasText: /^Send$/ }).first());
+    await sendBtn.waitFor({ timeout: this.timeout });
+    await sendBtn.click();
+    await this.page.waitForTimeout(2000);
+
+    // Extract thread URL from the page — look for messaging thread link/URL
+    // After sending, LinkedIn often shows the conversation. Try to get thread URL.
+    const currentUrl = this.page.url();
+    let threadUrl = '';
+
+    // Check if we're redirected to a messaging thread
+    const threadMatch = currentUrl.match(/\/messaging\/thread\/([^/]+)/);
+    if (threadMatch) {
+      threadUrl = `https://www.linkedin.com/messaging/thread/${threadMatch[1]}/`;
+    } else {
+      // Try to find thread URL in the messaging overlay
+      const threadLink = await this.page.evaluate(() => {
+        const links = document.querySelectorAll('a[href*="/messaging/thread/"]');
+        if (links.length > 0) return links[links.length - 1].href;
+        return '';
+      });
+      threadUrl = threadLink;
+    }
+
+    // If we still don't have a threadUrl, navigate to messaging inbox and find by name match
+    if (!threadUrl) {
+      // Get the applicant name from the hiring page before navigating away
+      const applicantName = await this.page.evaluate(() => {
+        const h1 = document.querySelector('h1');
+        return h1?.textContent?.trim() || '';
+      });
+
+      if (applicantName) {
+        await this.page.goto('https://www.linkedin.com/messaging/', { waitUntil: 'domcontentloaded' });
+        await this.page.waitForTimeout(2000);
+        await this.page.locator('ul[aria-label="Conversation List"]')
+          .waitFor({ timeout: this.timeout }).catch(() => {});
+
+        // Find conversation by name match — don't blindly click the first one
+        const nameParts = applicantName.toLowerCase().split(/\s+/);
+        const lastName = nameParts[nameParts.length - 1];
+        const listItems = this.page.locator('.msg-conversations-container__conversations-list > li.msg-conversation-listitem');
+        const count = await listItems.count();
+
+        for (let i = 0; i < Math.min(count, 10); i++) {
+          const convName = await listItems.nth(i).locator('h3').textContent().catch(() => '');
+          if (convName && convName.toLowerCase().includes(lastName)) {
+            const clickTarget = listItems.nth(i).locator('.msg-conversation-listitem__link').first();
+            await clickTarget.evaluate(el => el.click());
+            await this.page.waitForTimeout(1000);
+            const msgUrl = this.page.url();
+            const match = msgUrl.match(/\/messaging\/thread\/([^/]+)/);
+            if (match) {
+              threadUrl = `https://www.linkedin.com/messaging/thread/${match[1]}/`;
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    return { ok: true, threadUrl };
+  }
+
   /** Disconnect from Chrome */
   async disconnect() {
     if (this.browser) {
