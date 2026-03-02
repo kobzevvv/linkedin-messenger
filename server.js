@@ -133,7 +133,7 @@ app.post('/api/mark-read', async (req, res) => {
 // Get applicants from a job posting
 app.get('/api/hiring/applicants', async (req, res) => {
   const jobUrl = req.query.jobId || req.query.url;
-  const limit = parseInt(req.query.limit || '25', 10);
+  const limit = parseInt(req.query.limit || '200', 10);
   const filter = req.query.filter || 'all';
   if (!jobUrl) {
     return res.status(400).json({ error: 'jobId or url query param is required' });
@@ -174,7 +174,7 @@ app.post('/api/hiring/message', async (req, res) => {
 // Get applicants matched with their messaging threads
 app.get('/api/hiring/messages', async (req, res) => {
   const jobUrl = req.query.jobId || req.query.url;
-  const limit = parseInt(req.query.limit || '25', 10);
+  const limit = parseInt(req.query.limit || '200', 10);
   const inboxDepth = parseInt(req.query.inboxDepth || '30', 10);
   const filter = req.query.filter || 'all';
   if (!jobUrl) {
