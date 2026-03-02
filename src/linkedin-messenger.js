@@ -248,8 +248,8 @@ export class LinkedInMessenger {
           if (!text || text.length < 2) continue;
 
           // Detect if this is an outbound (sent) message
-          const isOutbound = li.closest('.msg-s-message-list__event--outbound') !== null
-            || li.classList.contains('msg-s-message-list__event--outbound');
+          const isOutbound = li.closest('.msg-s-message-list__event') !== null
+            && (li.querySelector('.msg-s-event-listitem__outbound') !== null || li.classList.contains('msg-s-event-listitem--outbound'));
 
           messages.push({
             from: isOutbound ? 'me' : 'them',
@@ -356,6 +356,7 @@ export class LinkedInMessenger {
       : [{ rating: ratingMap[filter], label: filter }];
 
     const allApplicants = [];
+    const seenAppIds = new Set();
 
     for (const group of groups) {
       if (allApplicants.length >= limit) break;
@@ -457,12 +458,16 @@ export class LinkedInMessenger {
 
         const fitCategory = group.label;
 
+        // Deduplicate by applicationId (scroll can reload same cards)
+        if (seenAppIds.has(applicationId)) continue;
+        seenAppIds.add(applicationId);
+
         this._log(`  [${allApplicants.length + 1}] ${listData[i].name} (${group.label}) → appId=${applicationId} ${status.contacted ? '✓contacted' : ''}`);
         allApplicants.push({ ...listData[i], applicationId, ...status, fitCategory });
       }
     }
 
-    this._log(`getHiringApplicants → ${allApplicants.length} applicants across ${groups.length} group(s)`);
+    this._log(`getHiringApplicants → ${allApplicants.length} unique applicants across ${groups.length} group(s)`);
     return allApplicants;
   }
 
@@ -611,7 +616,7 @@ export class LinkedInMessenger {
     await this.page.waitForTimeout(500);
 
     // Click "Send" button — prefer the compose-form-specific class, fallback to text match
-    const sendBtn = this.page.locator('.msg-form__send-button, button[type="submit"]').first()
+    const sendBtn = this.page.locator('.msg-form__send-toggle, button[type="submit"]').first()
       .or(this.page.locator('button').filter({ hasText: /^Send$/ }).first());
     await sendBtn.waitFor({ timeout: this.timeout });
     await sendBtn.click();

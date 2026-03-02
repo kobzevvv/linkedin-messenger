@@ -266,6 +266,19 @@ app.get('/api/hiring/messages', async (req, res) => {
   }
 });
 
+// ── Logs endpoint ───────────────────────────────────────────
+
+app.get('/api/logs', (_req, res) => {
+  const lines = parseInt(_req.query.lines || '100', 10);
+  try {
+    const log = readFileSync('/tmp/linkedin-messenger-server.log', 'utf-8');
+    const tail = log.split('\n').slice(-lines).join('\n');
+    res.type('text/plain').send(tail);
+  } catch {
+    res.status(500).send('Could not read logs');
+  }
+});
+
 // ── Health check & repair endpoints ──────────────────────────
 
 // Manual health check — tests all selectors against live page
