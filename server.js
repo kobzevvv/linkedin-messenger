@@ -122,13 +122,17 @@ app.post('/api/mark-read', async (req, res) => {
 app.get('/api/hiring/applicants', async (req, res) => {
   const jobUrl = req.query.jobId || req.query.url;
   const limit = parseInt(req.query.limit || '25', 10);
+  const filter = req.query.filter || 'all';
   if (!jobUrl) {
     return res.status(400).json({ error: 'jobId or url query param is required' });
+  }
+  if (!['all', 'top', 'maybe', 'notfit'].includes(filter)) {
+    return res.status(400).json({ error: 'filter must be one of: all, top, maybe, notfit' });
   }
   try {
     const applicants = await serialized(async () => {
       const m = await getMessenger();
-      return m.getHiringApplicants(jobUrl, { limit });
+      return m.getHiringApplicants(jobUrl, { limit, filter });
     });
     res.json(applicants);
   } catch (err) {
@@ -160,13 +164,14 @@ app.get('/api/hiring/messages', async (req, res) => {
   const jobUrl = req.query.jobId || req.query.url;
   const limit = parseInt(req.query.limit || '25', 10);
   const inboxDepth = parseInt(req.query.inboxDepth || '30', 10);
+  const filter = req.query.filter || 'all';
   if (!jobUrl) {
     return res.status(400).json({ error: 'jobId or url query param is required' });
   }
   try {
     const result = await serialized(async () => {
       const m = await getMessenger();
-      return m.getHiringMessages(jobUrl, { limit, inboxDepth });
+      return m.getHiringMessages(jobUrl, { limit, inboxDepth, filter });
     });
     res.json(result);
   } catch (err) {

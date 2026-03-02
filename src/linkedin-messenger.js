@@ -320,6 +320,7 @@ export class LinkedInMessenger {
    * @param {string} jobUrl - Full hiring URL (with jobId) or just the jobId
    * @param {object} opts
    * @param {number} opts.limit - Max applicants to return (default: 25)
+   * @param {string} opts.filter - Which filter groups to fetch: 'all' | 'top' | 'maybe' | 'notfit' (default: 'all')
    * @returns {Promise<Array<{
    *   name: string,
    *   title: string,
@@ -329,15 +330,24 @@ export class LinkedInMessenger {
    *   contacted: boolean,
    *   contactedTime: string,
    *   appliedTime: string,
+   *   fitCategory: string,
    * }>>}
    */
-  async getHiringApplicants(jobUrl, { limit = 25 } = {}) {
-    this._log(`getHiringApplicants(jobUrl=${String(jobUrl).substring(0, 60)}, limit=${limit})`);
+  async getHiringApplicants(jobUrl, { limit = 25, filter = 'all' } = {}) {
+    this._log(`getHiringApplicants(jobUrl=${String(jobUrl).substring(0, 60)}, limit=${limit}, filter=${filter})`);
     const jobId = typeof jobUrl === 'string' && jobUrl.startsWith('http')
       ? jobUrl.match(/jobId=(\d+)/)?.[1] || jobUrl
       : String(jobUrl);
 
     if (!jobId) throw new Error('Could not extract jobId from URL');
+
+    const filterMap = {
+      top: ['Top fit'],
+      maybe: ['Maybe'],
+      notfit: ['Not a fit'],
+      all: ['Top fit', 'Maybe', 'Not a fit'],
+    };
+    const filterGroups = filterMap[filter] || filterMap.all;
 
     await this.page.goto(
       `https://www.linkedin.com/hiring/applicants/?jobId=${jobId}`,
@@ -350,86 +360,155 @@ export class LinkedInMessenger {
       .first()
       .waitFor({ timeout: this.timeout });
 
-    // First pass: parse applicant metadata from the list (no clicking needed)
-    const listData = await this.page.evaluate((limit) => {
-      const btns = document.querySelectorAll('[role="button"][aria-label="View full profile"]');
-      const results = [];
+    const allApplicants = [];
 
-      for (const btn of btns) {
-        if (results.length >= limit) break;
-        // The container holds name, degree, title, location, qualifications
-        const container = btn.closest('li') || btn.parentElement?.parentElement?.parentElement;
-        if (!container) continue;
+    for (const fitCategory of filterGroups) {
+      if (allApplicants.length >= limit) break;
 
-        const text = container.innerText || '';
-        const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+      // Switch filter group via the dropdown
+      await this._selectHiringFilter(fitCategory);
 
-        // Pattern: Name, "· 3rd", Title, Location, "3/3", "Must-have", "1/1", "Preferred"
-        let name = '';
-        let connectionDegree = '';
-        let title = '';
-        let location = '';
+      // Scroll to load all lazy-loaded applicant cards
+      await this._scrollApplicantList();
 
-        for (let j = 0; j < lines.length; j++) {
-          const line = lines[j];
-          // Connection degree line
-          if (line.match(/^·\s*\d+\w+$/)) {
-            connectionDegree = line.replace(/^·\s*/, '');
-            continue;
+      const remaining = limit - allApplicants.length;
+
+      // First pass: parse applicant metadata from the list
+      const listData = await this.page.evaluate((remaining) => {
+        const btns = document.querySelectorAll('[role="button"][aria-label="View full profile"]');
+        const results = [];
+
+        for (const btn of btns) {
+          if (results.length >= remaining) break;
+          const container = btn.closest('li') || btn.parentElement?.parentElement?.parentElement;
+          if (!container) continue;
+
+          const text = container.innerText || '';
+          const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+          let name = '';
+          let connectionDegree = '';
+          let title = '';
+          let location = '';
+
+          for (let j = 0; j < lines.length; j++) {
+            const line = lines[j];
+            if (line.match(/^·\s*\d+\w+$/)) {
+              connectionDegree = line.replace(/^·\s*/, '');
+              continue;
+            }
+            if (line.match(/^\d+\/\d+$/) || line === 'Must-have' || line === 'Preferred') break;
+
+            if (!name) {
+              name = line;
+            } else if (!title) {
+              title = line;
+            } else if (!location) {
+              location = line;
+            }
           }
-          // Qualifications line (stop parsing)
-          if (line.match(/^\d+\/\d+$/) || line === 'Must-have' || line === 'Preferred') break;
 
-          if (!name) {
-            name = line;
-          } else if (!title) {
-            title = line;
-          } else if (!location) {
-            location = line;
-          }
+          results.push({ name, connectionDegree, title, location });
         }
 
-        results.push({ name, connectionDegree, title, location });
+        return results;
+      }, remaining);
+
+      this._log(`  Filter "${fitCategory}": ${listData.length} cards found`);
+
+      // Second pass: click each to get applicationId and contacted status
+      const profileBtns = this.page.locator('[role="button"][aria-label="View full profile"]');
+
+      for (let i = 0; i < listData.length; i++) {
+        await profileBtns.nth(i).click();
+        await this.page.waitForTimeout(1500);
+
+        const url = this.page.url();
+        const applicationId = url.match(/applicationId=(\d+)/)?.[1] || '';
+
+        const status = await this.page.evaluate(() => {
+          const text = document.body.innerText;
+          const resumeIdx = text.indexOf('Resume');
+          const qualIdx = text.indexOf('Qualifications', resumeIdx);
+          const panel = resumeIdx >= 0
+            ? text.substring(resumeIdx, qualIdx > resumeIdx ? qualIdx : resumeIdx + 500)
+            : '';
+          const appliedMatch = panel.match(/Applied (.+?)(?:\s*·|\n|$)/);
+          const contactedMatch = panel.match(/Contacted (.+?)(?:\s*·|\n|$)/);
+          return {
+            appliedTime: appliedMatch?.[1]?.trim() || '',
+            contacted: !!contactedMatch,
+            contactedTime: contactedMatch?.[1]?.trim() || '',
+          };
+        });
+
+        this._log(`  [${allApplicants.length + 1}] ${listData[i].name} (${fitCategory}) → appId=${applicationId} ${status.contacted ? '✓contacted' : ''}`);
+        allApplicants.push({ ...listData[i], applicationId, ...status, fitCategory });
       }
-
-      return results;
-    }, limit);
-
-    // Second pass: click each to get applicationId and contacted status
-    const profileBtns = this.page.locator('[role="button"][aria-label="View full profile"]');
-    const applicants = [];
-
-    for (let i = 0; i < listData.length; i++) {
-      await profileBtns.nth(i).click();
-      await this.page.waitForTimeout(1500);
-
-      const url = this.page.url();
-      const applicationId = url.match(/applicationId=(\d+)/)?.[1] || '';
-
-      // Check contacted status — scope to the right-panel area
-      // between "Resume" and "Qualifications" to avoid false positives from left panel
-      const status = await this.page.evaluate(() => {
-        const text = document.body.innerText;
-        const resumeIdx = text.indexOf('Resume');
-        const qualIdx = text.indexOf('Qualifications', resumeIdx);
-        const panel = resumeIdx >= 0
-          ? text.substring(resumeIdx, qualIdx > resumeIdx ? qualIdx : resumeIdx + 500)
-          : '';
-        const appliedMatch = panel.match(/Applied (.+?)(?:\s*·|\n|$)/);
-        const contactedMatch = panel.match(/Contacted (.+?)(?:\s*·|\n|$)/);
-        return {
-          appliedTime: appliedMatch?.[1]?.trim() || '',
-          contacted: !!contactedMatch,
-          contactedTime: contactedMatch?.[1]?.trim() || '',
-        };
-      });
-
-      this._log(`  [${i + 1}/${listData.length}] ${listData[i].name} → appId=${applicationId} ${status.contacted ? '✓contacted' : ''}`);
-      applicants.push({ ...listData[i], applicationId, ...status });
     }
 
-    this._log(`getHiringApplicants → ${applicants.length} applicants`);
-    return applicants;
+    this._log(`getHiringApplicants → ${allApplicants.length} applicants across ${filterGroups.length} filter(s)`);
+    return allApplicants;
+  }
+
+  /**
+   * Select a filter group in the hiring applicants dropdown.
+   * @param {string} filterName - "Top fit", "Maybe", or "Not a fit"
+   */
+  async _selectHiringFilter(filterName) {
+    this._log(`  Selecting filter: "${filterName}"`);
+
+    // Click the filter dropdown trigger button
+    const filterBtn = this.page.locator('button').filter({ hasText: /Top fit|Maybe|Not a fit/ }).first();
+    await filterBtn.click();
+    await this.page.waitForTimeout(500);
+
+    // Select the radio option matching the filter name
+    const option = this.page.locator('label, [role="radio"], [role="option"], li').filter({ hasText: filterName });
+    await option.first().click();
+    await this.page.waitForTimeout(300);
+
+    // Click "Show results" button
+    const showResults = this.page.locator('button').filter({ hasText: 'Show results' });
+    if (await showResults.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await showResults.click();
+      await this.page.waitForTimeout(2000);
+    } else {
+      // Some filters auto-apply without a "Show results" button
+      await this.page.waitForTimeout(1500);
+    }
+
+    // Wait for the list to reload
+    await this.page.locator('[role="button"][aria-label="View full profile"]')
+      .first()
+      .waitFor({ timeout: this.timeout })
+      .catch(() => this._log(`  Warning: no applicants found for filter "${filterName}"`));
+  }
+
+  /**
+   * Scroll the applicant list container to load all lazy-loaded cards.
+   */
+  async _scrollApplicantList() {
+    const maxScrollAttempts = 20;
+    for (let attempt = 0; attempt < maxScrollAttempts; attempt++) {
+      const countBefore = await this.page.locator('[role="button"][aria-label="View full profile"]').count();
+
+      // Scroll the list container (or fallback to window)
+      await this.page.evaluate(() => {
+        const listContainer = document.querySelector('[class*="applicant-list"]')
+          || document.querySelector('[class*="hiring-applicants"]')
+          || document.querySelector('main');
+        if (listContainer) {
+          listContainer.scrollTop = listContainer.scrollHeight;
+        }
+        window.scrollTo(0, document.body.scrollHeight);
+      });
+      await this.page.waitForTimeout(1000);
+
+      const countAfter = await this.page.locator('[role="button"][aria-label="View full profile"]').count();
+      if (countAfter === countBefore) break; // No new cards loaded
+      this._log(`  Scrolled: ${countBefore} → ${countAfter} cards`);
+    }
   }
 
   /**
@@ -451,9 +530,9 @@ export class LinkedInMessenger {
    *   lastMessageFrom: 'them' | 'me' | null,
    * }>>}
    */
-  async getHiringMessages(jobUrl, { limit = 25, inboxDepth = 30 } = {}) {
+  async getHiringMessages(jobUrl, { limit = 25, inboxDepth = 30, filter = 'all' } = {}) {
     // Step 1: Get applicant list
-    const applicants = await this.getHiringApplicants(jobUrl, { limit });
+    const applicants = await this.getHiringApplicants(jobUrl, { limit, filter });
 
     // Step 2: Scan messaging inbox
     const inbox = await this.getInbox({ limit: inboxDepth });
