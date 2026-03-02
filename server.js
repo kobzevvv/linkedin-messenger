@@ -289,7 +289,15 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`LinkedIn Messenger HTTP server listening on port ${PORT}`);
   console.log(`Chrome CDP port: ${CDP_PORT}`);
+
+  // Connect to Chrome eagerly so /health shows connected: true immediately
+  try {
+    await getMessenger();
+    console.log('Chrome connected.');
+  } catch (err) {
+    console.warn(`Chrome not available at startup: ${err.message}. Will retry on first request.`);
+  }
 });
